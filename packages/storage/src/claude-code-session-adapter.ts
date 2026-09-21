@@ -108,6 +108,17 @@ interface ParsedTranscript {
   readonly isSidechain: boolean;
 }
 
+/** One transcript the walk selected, carrying what its single `stat` observed.
+ *  The mtime both deduplicates candidates (newest wins) and keys the summary
+ *  cache; the size feeds the byte cap in `#parse` — one stat serves all
+ *  three, and no caller stat'ed again. */
+interface TranscriptCandidate {
+  readonly path: string;
+  readonly sessionId: string;
+  readonly mtimeMs: number;
+  readonly size: number;
+}
+
 export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
   readonly id = CLAUDE_CODE_SESSION_ADAPTER_ID;
   readonly #home: string;
@@ -149,7 +160,7 @@ export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
     // calls are independent. Results keep `files` order and the sort below is
     // stable, so the list is the same one the sequential loop produced.
     const derived = await mapWithConcurrency(files, LIST_CONCURRENCY, (file) =>
-      this.#summaryOf(file.path, file.sessionId),
+      this.#summaryOf(file),
     );
     const summaries: ExternalSessionSummary[] = [];
     for (const summary of derived) {
@@ -174,18 +185,15 @@ export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
    *
    * `undefined` is cached too: a sidechain transcript or an unreadable one is
    * a stable answer, and re-deriving it every list would defeat the point.
+   *
+   * The cache key is the walk's own stat, not a fresh one taken here: within
+   * a listing that makes the dedup choice and the cache key one observation
+   * of one file rather than two that can disagree. A transcript appended
+   * between the walk and this read lands in the cache under the older key,
+   * and the next listing — which sees the new mtime — re-reads it.
    */
-  async #summaryOf(path: string, sessionId: string): Promise<ExternalSessionSummary | undefined> {
-    let mtimeMs: number;
-    let size: number;
-    try {
-      const info = await stat(path);
-      mtimeMs = info.mtimeMs;
-      size = info.size;
-    } catch {
-      this.#summaries.delete(path);
-      return undefined;
-    }
+  async #summaryOf(candidate: TranscriptCandidate): Promise<ExternalSessionSummary | undefined> {
+    const { path, sessionId, mtimeMs, size } = candidate;
     const cached = this.#summaries.get(path);
     if (cached && cached.mtimeMs === mtimeMs && cached.size === size) return cached.summary;
 
@@ -213,7 +221,7 @@ export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
       (candidate) => candidate.sessionId === sessionId,
     );
     if (!file) throw new Error(`Claude Code transcript not found: ${sessionId}`);
-    const parsed = await this.#parse(file.path, sessionId);
+    const parsed = await this.#parse(file.path, sessionId, file.size);
     if (!parsed) throw new Error(`Claude Code transcript could not be read: ${sessionId}`);
     if (parsed.isSidechain) {
       throw new Error(`Claude Code transcript is a sub-agent sidechain: ${sessionId}`);
@@ -229,7 +237,7 @@ export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
     return join(this.#home, 'projects');
   }
 
-  async #transcriptFiles(): Promise<ReadonlyArray<{ path: string; sessionId: string }>> {
+  async #transcriptFiles(): Promise<ReadonlyArray<TranscriptCandidate>> {
     const root = this.#projectsRoot();
     let projects: string[];
     try {
@@ -267,9 +275,12 @@ export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
         candidates.push({ path, sessionId });
       }
     }
-    const mtimes = await mapWithConcurrency(candidates, LIST_CONCURRENCY, async (candidate) => {
+    // One stat per file, kept: the mtime decides the newest-wins winner and
+    // the size is what the cache check and the byte cap in `#parse` read.
+    const stats = await mapWithConcurrency(candidates, LIST_CONCURRENCY, async (candidate) => {
       try {
-        return (await stat(candidate.path)).mtimeMs;
+        const info = await stat(candidate.path);
+        return { mtimeMs: info.mtimeMs, size: info.size };
       } catch {
         return undefined;
       }
@@ -279,30 +290,30 @@ export class ClaudeCodeSessionAdapter implements ExternalSessionAdapter {
     // files with one id are two candidates for the same source session, and
     // list and read must pick the same one or a user selects one summary and
     // imports the other.
-    const bySessionId = new Map<string, { path: string; sessionId: string; mtimeMs: number }>();
+    const bySessionId = new Map<string, TranscriptCandidate>();
     for (const [index, { path, sessionId }] of candidates.entries()) {
-      const mtimeMs = mtimes[index];
-      if (mtimeMs === undefined) continue;
+      const observed = stats[index];
+      if (observed === undefined) continue;
       const existing = bySessionId.get(sessionId);
       // Newest wins, and the path breaks a tie so the choice does not depend
       // on directory iteration order. A resumed session's continuation is
       // the copy a user means when they pick that id.
       if (
         !existing ||
-        mtimeMs > existing.mtimeMs ||
-        (mtimeMs === existing.mtimeMs && path < existing.path)
+        observed.mtimeMs > existing.mtimeMs ||
+        (observed.mtimeMs === existing.mtimeMs && path < existing.path)
       ) {
-        bySessionId.set(sessionId, { path, sessionId, mtimeMs });
+        bySessionId.set(sessionId, { path, sessionId, ...observed });
       }
     }
-    return [...bySessionId.values()].map(({ path, sessionId }) => ({ path, sessionId }));
+    return [...bySessionId.values()];
   }
 
   /**
-   * `knownSize` lets a caller that just stat'ed the file (the listing cache
-   * check in `#summaryOf`) skip the redundant stat — one metadata round trip
-   * per transcript on the listing hot path. A size read there can only race a
-   * concurrent writer in the same way a second stat already did.
+   * `knownSize` lets a caller that already stat'ed the file (the listing walk
+   * in `#transcriptFiles`) skip the redundant stat — one metadata round trip
+   * per transcript on the listing hot path. A size read there can only race
+   * a concurrent writer in the same way a fresh stat already did.
    */
   async #parse(
     path: string,
