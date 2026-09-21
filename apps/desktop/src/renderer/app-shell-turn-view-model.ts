@@ -22,7 +22,6 @@ import type { UiLocale } from '@maka/core/ui-locale';
 import {
   deriveTurnLineageMap,
   finalAssistantReplyText,
-  formatTurnDuration,
   isSandboxDeniedTool,
   type TurnFooterActionMeta,
   type TurnLineageBadge,
@@ -36,7 +35,10 @@ import {
   describeTurnErrorClass,
   deriveFailedTurnSeverity,
 } from './session-status-presentation.js';
-import { deriveTurnFooterActions } from './turn-footer-actions.js';
+import {
+  deriveTurnFooterActions,
+  type TurnFooterActionId,
+} from './turn-footer-actions.js';
 import { deriveTurnLineageBadges } from './derive-turn-lineage-badges.js';
 import { latestInterruptedResumeTurnId } from './interrupted-resume.js';
 
@@ -60,7 +62,7 @@ interface TurnPresentationEntry {
   failedExecutionStateLabel?: string;
 }
 
-const PENDING_ACTION_IDS = ['regenerate', 'branch', 'copy'] as const;
+const PENDING_ACTION_IDS = ['branch', 'copy'] as const;
 
 function isSandboxOnlyToolFailure(turn: TurnViewModel): boolean {
   const erroredTools = turn.tools.filter((tool) => tool.status === 'errored');
@@ -119,7 +121,7 @@ export function createAppShellTurnPresentationDerivation(): AppShellTurnPresenta
 
     for (const turn of turns) {
       const lineageEntry = lineage.get(turn.turnId);
-      const pendingForTurn = new Set<TurnFooterActionMeta['id']>();
+      const pendingForTurn = new Set<TurnFooterActionId>();
       for (const id of PENDING_ACTION_IDS) {
         if (
           context.activeId &&
@@ -184,30 +186,16 @@ export function createAppShellTurnPresentationDerivation(): AppShellTurnPresenta
 function deriveTurnPresentationEntry(input: {
   turn: TurnViewModel;
   lineageEntry: TurnLineageTarget | undefined;
-  pendingForTurn: ReadonlySet<TurnFooterActionMeta['id']>;
+  pendingForTurn: ReadonlySet<TurnFooterActionId>;
   existsTurn(id: string): boolean;
   uiLocale: UiLocale;
 }): TurnPresentationEntry {
   const { turn, lineageEntry, pendingForTurn, uiLocale } = input;
-  const metaParts: string[] = [];
-  if (turn.modelId) metaParts.push(turn.modelId);
-  // Below a second there is nothing to report: a turn's duration counts whole
-  // seconds, so a 300ms turn would read「0s」— a number that says less than no
-  // number at all.
-  if (turn.durationMs && turn.durationMs >= 1_000) metaParts.push(formatTurnDuration(turn.durationMs));
-  if (turn.tokens?.costUsd && turn.tokens.costUsd > 0) metaParts.push(`$${turn.tokens.costUsd.toFixed(4)}`);
-  const metaSummary = metaParts.length > 0 ? metaParts.join(' · ') : undefined;
   const footerActions = deriveTurnFooterActions({
     status: turn.status,
     locale: uiLocale,
     hasContent: finalAssistantReplyText(turn).trim().length > 0,
-    // Match the badge lineage rule (regenerate ?? legacy retry) so a turn
-    // that already has a parallel answer hints at it in the tooltip too.
-    ...((lineageEntry?.regeneratedToTurnId ?? lineageEntry?.retriedToTurnId)
-      ? { alreadyRegenerated: true }
-      : {}),
     ...(pendingForTurn.size > 0 ? { pendingActions: pendingForTurn } : {}),
-    ...(metaSummary ? { metaSummary } : {}),
   });
 
   const entry: TurnPresentationEntry = { footerActions };

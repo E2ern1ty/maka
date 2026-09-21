@@ -21,6 +21,7 @@ import { MAX_ATTACHMENT_BYTES, MAX_ATTACHMENT_COUNT } from '@maka/core/attachmen
 import {
   decodeMessageContent as decodeCanonicalMessageContent,
   DIRECTORY_REFERENCE_MAX_COUNT,
+  hasMeaningfulMessageContent,
   isCanonicalAttachmentRef,
   type ContextCompactionOutcome,
   type MessageContent,
@@ -92,12 +93,6 @@ export interface TurnStopInput {
   sessionId: string;
   turnId: string;
   runId: string;
-}
-
-export interface TurnRegenerateInput {
-  sessionId: string;
-  sourceTurnId: string;
-  turnId: string;
 }
 
 export interface TurnResumeQueryInput {
@@ -268,27 +263,6 @@ export const TURN_OPERATION_SPECS = {
     ] as const,
     decodeInput: decodeTurnStopInput,
     decodeOutput: decodeTurnSnapshot,
-  }),
-  'turn.regenerate': defineOperation({
-    mode: 'command',
-    availability: 'ready',
-    errors: [
-      'host_not_ready',
-      'host_draining',
-      'operation_unavailable',
-      'not_found',
-      'session_archived',
-      'session_busy',
-      'operation_conflict',
-      'internal_failure',
-    ] as const,
-    decodeInput: decodeTurnRegenerateInput,
-    decodeOutput: decodeTurnSnapshot,
-    assertOutputForInput: (input, output) => {
-      if (input.sessionId !== output.sessionId || input.turnId !== output.turnId) {
-        throw invalidProtocolFrame('Turn regenerate changed operation identity');
-      }
-    },
   }),
   'turn.resume.query': defineOperation({
     mode: 'query',
@@ -472,7 +446,15 @@ export function decodeMessageAdmissionContent(
   value: unknown,
   allowEmptyText = false,
 ): MessageContent {
-  const content = decodeMessageContent(value, allowEmptyText);
+  // Structure first with text emptiness unconstrained, then apply the
+  // shared meaningful-content predicate: a quote or an attachment carries
+  // the turn by itself, so empty inline text is admissible when either is
+  // present (#4804). A truly contentless Message still throws, with the
+  // same frame error the text-length rule produced.
+  const content = decodeMessageContent(value, true);
+  if (!allowEmptyText && !hasMeaningfulMessageContent(content)) {
+    throw invalidProtocolFrame('Invalid Message text');
+  }
   if (content.attachments?.some((attachment) => attachment.ref.kind === 'session_context')) {
     throw invalidProtocolFrame('Session context references are Host-owned');
   }
@@ -521,19 +503,6 @@ function decodeTurnStopInput(value: unknown): TurnStopInput {
     sessionId: requireEntityId(record.sessionId, 'sessionId'),
     turnId: requireEntityId(record.turnId, 'turnId'),
     runId: requireEntityId(record.runId, 'runId'),
-  };
-}
-
-function decodeTurnRegenerateInput(value: unknown): TurnRegenerateInput {
-  const record = requireExactRecord(value, 'turn.regenerate input', [
-    'sessionId',
-    'sourceTurnId',
-    'turnId',
-  ]);
-  return {
-    sessionId: requireEntityId(record.sessionId, 'sessionId'),
-    sourceTurnId: requireEntityId(record.sourceTurnId, 'sourceTurnId'),
-    turnId: requireEntityId(record.turnId, 'turnId'),
   };
 }
 

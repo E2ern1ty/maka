@@ -146,7 +146,6 @@ export function AddProviderForm(props: {
   const supportsApiKey = providerAuthSupportsApiKey(props.providerType);
   const requiresApiKey = providerAuthRequiresSecret(props.providerType) && supportsApiKey;
   const usesApiKeyDialog = usesQuickApiKeyDialog(props.providerType);
-
   function setManagedPhase(next: ManagedOnboardingPhase) {
     setFormState((current) => ({ ...current, managedPhase: next }));
   }

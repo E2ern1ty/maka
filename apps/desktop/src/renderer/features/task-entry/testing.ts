@@ -35,6 +35,7 @@ export {
   selectAvailableProfile,
   taskEntryDraftKey,
 } from './model/task-entry-selection.js';
+export { resolveWorkBoardStartTarget } from './model/work-board-target.js';
 export type {
   TaskEntryCatalog,
   TaskEntryHost,
@@ -52,6 +53,9 @@ export function createFakeTaskEntryServices(
       subscribeChanges: noopSubscription,
       addProject: async () => ({ ok: false, reason: 'cancelled' }),
       relinkProject: async () => ({ ok: false, reason: 'cancelled' }),
+      renameProject: async () => undefined,
+      archiveProject: async () => undefined,
+      restoreProject: async () => undefined,
     },
     ...overrides,
   };

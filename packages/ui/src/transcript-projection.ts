@@ -27,8 +27,10 @@ import {
   materializeTurns,
   overlayLiveTurn,
   projectTurnTools,
+  timelineItemKey,
   type ShellRunOverlayEntry,
   type ToolActivityItem,
+  type TurnTimelineItem,
   type TurnViewModel,
 } from './materialize.js';
 
@@ -62,7 +64,7 @@ export interface TranscriptProjectionInput {
   sessionId?: string;
   locale: UiLocale;
   messages: readonly StoredMessage[];
-  liveTurn?: LiveTurnProjection;
+  liveTurns?: readonly LiveTurnProjection[];
   shellRunUpdates?: readonly ShellRunUpdate[];
 }
 
@@ -80,7 +82,7 @@ export function createTranscriptProjection(): TranscriptProjection {
   // Stage inputs, remembered so a stage only reruns when its own input moved.
   let lastMessages: readonly StoredMessage[] | undefined;
   let lastLocale: UiLocale | undefined;
-  let lastLiveTurn: LiveTurnProjection | undefined;
+  let lastLiveTurn: readonly LiveTurnProjection[] | undefined;
   let lastUpdates: readonly ShellRunUpdate[] | undefined;
 
   // Stage outputs.
@@ -121,6 +123,10 @@ export function createTranscriptProjection(): TranscriptProjection {
     const updatesMoved = lastUpdates === undefined
       || lastUpdates.length !== updates.length
       || updates.some((update, index) => update !== lastUpdates![index]);
+    const buffersMoved = input.liveTurns !== lastLiveTurn && (
+      input.liveTurns?.length !== lastLiveTurn?.length
+      || input.liveTurns?.some((turn, index) => turn !== lastLiveTurn?.[index]) === true
+    );
 
     // Same inputs, same answer, without advancing any owned state — which is
     // what makes projecting during render safe under double invocation.
@@ -128,7 +134,7 @@ export function createTranscriptProjection(): TranscriptProjection {
       hasProjected
       && input.messages === lastMessages
       && input.locale === lastLocale
-      && input.liveTurn === lastLiveTurn
+      && !buffersMoved
       && !updatesMoved
     ) {
       return lastTurns;
@@ -144,12 +150,12 @@ export function createTranscriptProjection(): TranscriptProjection {
     }
     if (
       liveTurnsFrom !== settledTurns ||
-      input.liveTurn !== lastLiveTurn ||
+      buffersMoved ||
       input.locale !== lastOverlayLocale
     ) {
-      liveTurns = overlayLiveTurn(settledTurns, input.liveTurn, input.locale);
+      liveTurns = (input.liveTurns ?? []).reduce<readonly TurnViewModel[]>((turns, live) => overlayLiveTurn(turns, live, input.locale), settledTurns);
       liveTurnsFrom = settledTurns;
-      lastLiveTurn = input.liveTurn;
+      lastLiveTurn = input.liveTurns;
       lastOverlayLocale = input.locale;
     }
     if (updatesMoved) {
@@ -212,9 +218,35 @@ export function reconcileTurnIdentities(
   const previousById = new Map(previous.map((turn) => [turn.turnId, turn]));
   const reconciled = next.map((turn) => {
     const prior = previousById.get(turn.turnId);
-    return prior && valuesEqual(prior, turn) ? prior : turn;
+    if (!prior || valuesEqual(prior, turn)) return prior ?? turn;
+    // The turn moved, but usually only its tail did: hand the previous
+    // timeline entry back for every item whose value did not change, so the
+    // entry-level memo boundaries downstream see what actually moved.
+    return { ...turn, timeline: reconcileTimelineItems(prior.timeline, turn.timeline) };
   });
   return reconciled.length === previous.length && reconciled.every((turn, index) => turn === previous[index])
+    ? previous
+    : reconciled;
+}
+
+/**
+ * Keep the previous object for every timeline item whose projected value is
+ * unchanged. `overlayLiveTurn` rebuilds a live turn's whole timeline from its
+ * steps on every event, so nothing upstream carries item identity — matching
+ * by `timelineItemKey` survives mid-timeline inserts (steering messages),
+ * which a positional compare would report as a change of everything after.
+ */
+export function reconcileTimelineItems(
+  previous: TurnTimelineItem[],
+  next: TurnTimelineItem[],
+): TurnTimelineItem[] {
+  if (previous.length === 0) return next;
+  const previousByKey = new Map(previous.map((item) => [timelineItemKey(item), item]));
+  const reconciled = next.map((item) => {
+    const prior = previousByKey.get(timelineItemKey(item));
+    return prior !== undefined && valuesEqual(prior, item) ? prior : item;
+  });
+  return reconciled.length === previous.length && reconciled.every((item, index) => item === previous[index])
     ? previous
     : reconciled;
 }

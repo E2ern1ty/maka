@@ -135,19 +135,76 @@ test('a released operation is dropped from the record and reported as accounted 
   assert.deepEqual(unresolvedPersistedGrants(file), []);
 });
 
-test('retired Coordination record grant is released through read and rewrite', async () => {
+test('the retired Regenerate grant is dropped from released credentials', async () => {
   const path = await writeAccessFile({
     schemaVersion: 3,
-    credentials: [storedCredential(['host.status', 'workhub.coordination.record'])],
+    credentials: [storedCredential(['host.status', 'turn.regenerate'])],
     sessionGrants: [],
     turnAccessRequests: [],
   });
+
   const file = await readAccessCredentialFile(path);
   assert.deepEqual(file.credentials[0]?.grants, ['host.status']);
   assert.deepEqual(unresolvedPersistedGrants(file), []);
-  await writeAccessCredentialFile(path, file);
-  assert.deepEqual(JSON.parse(await readFile(path, 'utf8')).credentials[0].operationGrants, [
+});
+
+test('the retired Command Code GO usage grant is dropped from released credentials', async () => {
+  const path = await writeAccessFile({
+    schemaVersion: 3,
+    credentials: [storedCredential(['host.status', 'connection.usage.read'])],
+    sessionGrants: [],
+    turnAccessRequests: [],
+  });
+
+  const file = await readAccessCredentialFile(path);
+  assert.deepEqual(file.credentials[0]?.grants, ['host.status']);
+  assert.deepEqual(unresolvedPersistedGrants(file), []);
+});
+
+test('retired WorkHub grants are released without granting active-turn authority', async () => {
+  const original = storedCredential([
     'host.status',
+    'workhub.coordination.act',
+    'workhub.coordination.record',
+  ]);
+  const path = await writeAccessFile({
+    schemaVersion: 3,
+    credentials: [original],
+    sessionGrants: [],
+    turnAccessRequests: [],
+  });
+
+  const file = await readAccessCredentialFile(path);
+  const credential = file.credentials[0];
+  assert.ok(credential);
+  assert.deepEqual(unresolvedPersistedGrants(file), []);
+  assert.deepEqual(effectiveOperationGrants(credential), ['host.status']);
+
+  await writeAccessCredentialFile(path, file);
+  const rewritten = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(rewritten.credentials, [{ ...original, operationGrants: ['host.status'] }]);
+});
+
+test('retires the research grant while preserving the released credential across restart', async () => {
+  const original = storedCredential(['host.status', 'deep-research.query', 'artifact.query']);
+  const path = await writeAccessFile({
+    schemaVersion: 3,
+    credentials: [original],
+    sessionGrants: [],
+    turnAccessRequests: [],
+  });
+
+  const file = await readAccessCredentialFile(path);
+  assert.deepEqual(unresolvedPersistedGrants(file), []);
+  await writeAccessCredentialFile(path, file);
+  const reopened = await readAccessCredentialFile(path);
+  assert.deepEqual(effectiveOperationGrants(reopened.credentials[0]!), [
+    'host.status',
+    'artifact.query',
+  ]);
+  const rewritten = JSON.parse(await readFile(path, 'utf8'));
+  assert.deepEqual(rewritten.credentials, [
+    { ...original, operationGrants: ['host.status', 'artifact.query'] },
   ]);
 });
 

@@ -75,6 +75,7 @@ import {
   type EffectivePricingEntry,
   type ExternalSessionCatalogQueryInput,
   type ExternalSessionCatalogQueryResult,
+  type ExternalSessionImportResult,
   type ExternalSessionSourceQueryResult,
   type ClientCapabilityReplaceResult,
   type ClientCapabilityUnregisterResult,
@@ -153,6 +154,7 @@ import {
   type TurnMessageSubmitInput,
   type TurnMessageSubmitResult,
   type WorkspaceProjection,
+  type WorkspaceTarget,
 } from "@maka/runtime-host/protocol";
 
 const decodeStoredMessage = (value: unknown): StoredMessage =>
@@ -210,12 +212,14 @@ export interface DesktopRuntimeHostSession {
   readonly snapshot: SessionContinuitySnapshot;
   readonly activeAssistantStreams: readonly SessionAssistantStreamIdentity[];
   readonly transcriptBootstrap: SessionTranscriptBootstrap;
+  readonly transcriptWatermark: number | null;
+  /** The subscription's own death certificate. Read this before trusting a
+   * `connection_closed` mask thrown by a racing transcript read. */
+  readonly deathCause: Error | undefined;
   readonly events: AsyncIterable<SubscriptionFrame>;
+  /** Frames are held by the Host until this resolves. */
+  ready(): Promise<void>;
   loadTranscript(): Promise<StoredMessage[]>;
-  loadTranscriptOverlay(
-    maxMessageBytes?: number,
-    accountAssemblyBytes?: (deltaBytes: number) => void,
-  ): Promise<StoredMessage[]>;
   decodeTranscriptPage(
     page: SessionTranscriptPage,
     maxMessageBytes?: number,
@@ -435,8 +439,16 @@ export class DesktopRuntimeHostClient {
   async updateRuntimePolicy(
     buildOperation: (policy: RuntimePolicy) => RuntimePolicyMutation,
   ): Promise<OperationOutput<"runtime.policy.query">> {
+    return this.updateRuntimePolicyIf(() => true, buildOperation);
+  }
+
+  async updateRuntimePolicyIf(
+    accepts: (policy: RuntimePolicy) => boolean,
+    buildOperation: (policy: RuntimePolicy) => RuntimePolicyMutation,
+  ): Promise<OperationOutput<"runtime.policy.query">> {
     for (let attempt = 0; attempt < MAX_OPTIMISTIC_ATTEMPTS; attempt += 1) {
       const current = await this.queryRuntimePolicy();
+      if (!accepts(current.policy)) return current;
       const result = await this.request("runtime.policy.mutate", {
         expectedRevision: current.revision,
         operation: buildOperation(current.policy),
@@ -544,6 +556,18 @@ export class DesktopRuntimeHostClient {
     input: OperationInput<"connection.onboarding.save">,
   ): Promise<OperationOutput<"connection.onboarding.save">> {
     return this.request("connection.onboarding.save", input);
+  }
+
+  startExternalAgentSetup(input: OperationInput<"external_agents.setup.start">): Promise<OperationOutput<"external_agents.setup.start">> {
+    return this.request("external_agents.setup.start", input);
+  }
+
+  queryExternalAgentSetup(attemptId: string): Promise<OperationOutput<"external_agents.setup.query">> {
+    return this.request("external_agents.setup.query", { attemptId });
+  }
+
+  cancelExternalAgentSetup(attemptId: string): Promise<OperationOutput<"external_agents.setup.cancel">> {
+    return this.request("external_agents.setup.cancel", { attemptId });
   }
 
   startOAuthLogin(
@@ -692,6 +716,17 @@ export class DesktopRuntimeHostClient {
     } catch {
       return { kind: "saved_refresh_failed", disposition: result.kind };
     }
+  }
+
+  /**
+   * Recall over this Host's own corpus.
+   *
+   * Recall runs inside the Host — the Session manager, fact store, and
+   * material fetch are all Host-owned — so this is a request, not a scan.
+   * Desktop issues one per Host and merges; it never reads the transcripts.
+   */
+  queryRecall(input: OperationInput<'recall.query'>): Promise<OperationOutput<'recall.query'>> {
+    return this.request('recall.query', input);
   }
 
   async listSessions(): Promise<SessionCatalogProjection[]> {
@@ -975,17 +1010,29 @@ export class DesktopRuntimeHostClient {
     return this.request("workhub.coordination.resolve", {});
   }
 
+  async getWorkHubSession(): Promise<SessionCatalogProjection> {
+    return requireSessionProjection(await this.request('workhub.coordination.query', {}));
+  }
+
+  answerWorkHubCoordination(input: OperationInput<'workhub.coordination.answer'>) {
+    return this.request('workhub.coordination.answer', input);
+  }
+
+  configureWorkHubModel(input: OperationInput<'workhub.coordination.configureModel'>) {
+    return this.request('workhub.coordination.configureModel', input);
+  }
+
   listWorkHubCoordinationCandidates() {
     return this.request("workhub.coordination.candidates", {});
   }
 
-  actWorkHubCoordination(
-    input: OperationInput<"workhub.coordination.act">,
-  ): Promise<OperationOutput<"workhub.coordination.act">> {
-    return this.request("workhub.coordination.act", input);
+  selectAndDelegateWorkHubTarget(input: OperationInput<'workhub.coordination.selectAndDelegate'>) {
+    return this.request('workhub.coordination.selectAndDelegate', input);
   }
 
-
+  actWorkHubCoordinationFromTurn(input: OperationInput<'workhub.coordination.actFromTurn'>) {
+    return this.request('workhub.coordination.actFromTurn', input);
+  }
 
   listExternalSessionSources(): Promise<ExternalSessionSourceQueryResult> {
     return this.request("external-session.source.query", {});
@@ -1000,9 +1047,25 @@ export class DesktopRuntimeHostClient {
   async importExternalSession(input: {
     readonly adapterId: string;
     readonly sourceSessionId: string;
-  }): Promise<SessionCatalogProjection> {
+  }): Promise<ExternalSessionImportResult<SessionCatalogProjection>> {
     const result = await this.request("external-session.import", input);
-    return requireSessionProjection(result.session);
+    return result.kind === 'imported'
+      ? { kind: 'imported', session: requireSessionProjection(result.session) }
+      : result;
+  }
+
+  exportSessionBundle(input: {
+    readonly sessionId: string;
+    readonly destination: string;
+    readonly expectedSubtreeDigest?: string;
+  }): Promise<{ readonly sessionCount: number; readonly compressedBytes: number }> {
+    return this.request("session-bundle.export", input);
+  }
+
+  importSessionBundle(input: {
+    readonly source: string;
+  }): Promise<{ readonly sessionCount: number; readonly artifactFiles: number }> {
+    return this.request("session-bundle.import", input);
   }
 
   updateSessionMetadata(
@@ -1034,6 +1097,30 @@ export class DesktopRuntimeHostClient {
         patch: definedPatch,
       }),
     );
+  }
+
+  /**
+   * Re-point an existing Session at another workspace, at the revision the
+   * caller read.
+   *
+   * Deliberately a single attempt. The target can carry a working directory the
+   * caller read from that same revision — a `host_path` taken from the Session
+   * while detaching it from every project — and retrying against a fresher one
+   * would commit that stale directory under the new revision, undoing whatever
+   * the concurrent write did. A conflict is the answer, not a replay.
+   */
+  async relocateSessionWorkspace(
+    sessionId: string,
+    expectedRevision: number,
+    workspace: WorkspaceTarget,
+  ): Promise<SessionCatalogProjection> {
+    const result = await this.request("session.workspace.relocate", {
+      sessionId,
+      expectedRevision,
+      workspace,
+    });
+    if (result.kind === "committed") return requireSessionProjection(result.session);
+    throw revisionConflict("relocate", sessionId);
   }
 
   async setSessionReadMarker(
@@ -1323,11 +1410,14 @@ export class DesktopRuntimeHostClient {
 
   prepareHostRetirement(
     mode: RuntimeHostRetirementMode,
+    options?: { readonly timeoutMs?: number; readonly allowCooperativeHandoff?: boolean },
   ): Promise<RuntimeHostRetirementPreparation> {
     return prepareConnectedRuntimeHostRetirement(
       this.connection,
       mode,
-      RUNTIME_HOST_RETIREMENT_TIMEOUT_MS,
+      options?.timeoutMs ?? RUNTIME_HOST_RETIREMENT_TIMEOUT_MS,
+      undefined,
+      options,
     );
   }
 
@@ -1335,12 +1425,6 @@ export class DesktopRuntimeHostClient {
     input: OperationInput<"turn.stop">,
   ): Promise<OperationOutput<"turn.stop">> {
     return this.request("turn.stop", input);
-  }
-
-  regenerateTurn(
-    input: OperationInput<"turn.regenerate">,
-  ): Promise<OperationOutput<"turn.regenerate">> {
-    return this.request("turn.regenerate", input);
   }
 
   queryTurnResume(
@@ -1513,12 +1597,6 @@ export class DesktopRuntimeHostClient {
     return this.request("agent.graph.stop", input);
   }
 
-  queryDeepResearch(
-    sessionId: string,
-  ): Promise<OperationOutput<"deep-research.query">> {
-    return this.request("deep-research.query", { sessionId });
-  }
-
   async listRuntimeResources(sessionId: string): Promise<ShellRunUpdate[]> {
     this.#assertOpen();
     try {
@@ -1650,11 +1728,13 @@ export class DesktopRuntimeHostClient {
 
   async listSessionTurnLandmarks(
     sessionId: string,
+    turnId: string | null = null,
   ): Promise<OperationOutput<'session.turn_landmarks.query'>> {
     this.#assertOpen();
     return this.request('session.turn_landmarks.query', {
       sessionId,
-      maxLandmarks: 64,
+      maxLandmarks: turnId === null ? 64 : 1,
+      turnId,
     });
   }
 
@@ -1801,6 +1881,18 @@ class DesktopSessionHandle implements DesktopRuntimeHostSession {
     this.events = subscription;
   }
 
+  get transcriptWatermark(): number | null {
+    return this.subscription.transcriptWatermark;
+  }
+
+  get deathCause(): Error | undefined {
+    return this.subscription.deathCause;
+  }
+
+  ready(): Promise<void> {
+    return this.subscription.ready();
+  }
+
   loadTranscript(): Promise<StoredMessage[]> {
     this.#transcriptTask ??= this.subscription.loadTranscript(decodeStoredMessage);
     return this.#transcriptTask;
@@ -1808,17 +1900,6 @@ class DesktopSessionHandle implements DesktopRuntimeHostSession {
 
   subscribePtyData(listener: Parameters<RuntimeHostSessionSubscription['subscribePtyData']>[0]): () => void {
     return this.subscription.subscribePtyData(listener);
-  }
-
-  loadTranscriptOverlay(
-    maxMessageBytes?: number,
-    accountAssemblyBytes?: (deltaBytes: number) => void,
-  ): Promise<StoredMessage[]> {
-    return this.subscription.loadTranscriptOverlay(
-      decodeStoredMessage,
-      maxMessageBytes,
-      accountAssemblyBytes,
-    );
   }
 
   decodeTranscriptPage(

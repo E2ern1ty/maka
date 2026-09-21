@@ -57,7 +57,6 @@ const backgroundUpdate: ShellRunUpdate = {
 function streamingTurn(text: string): LiveTurnProjection {
   return {
     turnId: 'turn-3',
-    phase: 'streamed',
     steps: [{
       stepId: 'step-1',
       contentOrder: ['text'],
@@ -107,13 +106,12 @@ describe('incremental transcript projection', () => {
     // live "compacting" row.
     const liveTurn: LiveTurnProjection = {
       turnId: 'turn-compact',
-      phase: 'waiting',
       steps: [],
       rootExecutionKind: 'context_compact',
       startedAt: 1,
     };
-    const english = projection.project({ sessionId: SESSION, messages: [], liveTurn, locale: 'en' });
-    const chinese = projection.project({ sessionId: SESSION, messages: [], liveTurn, locale: 'zh-CN' });
+    const english = projection.project({ sessionId: SESSION, messages: [], liveTurns: liveTurn ? [liveTurn] : undefined, locale: 'en' });
+    const chinese = projection.project({ sessionId: SESSION, messages: [], liveTurns: liveTurn ? [liveTurn] : undefined, locale: 'zh-CN' });
     assert.equal(english[0]?.notes[0]?.text, 'Compacting context…');
     assert.equal(chinese[0]?.notes[0]?.text, '正在压缩上下文…');
   });
@@ -121,7 +119,7 @@ describe('incremental transcript projection', () => {
   test('a shell-run update whose semantics are unchanged affects nothing', () => {
     const projection = createTranscriptProjection();
     const messages = history();
-    const base = { locale: 'en' as const, sessionId: SESSION, messages, liveTurn: streamingTurn('he') };
+    const base = { locale: 'en' as const, sessionId: SESSION, messages, liveTurns: streamingTurn('he') ? [streamingTurn('he')] : undefined };
     const settled = projection.project({ ...base, shellRunUpdates: [backgroundUpdate] });
 
     // A new update object carrying an already-merged revision says nothing new.
@@ -202,7 +200,7 @@ describe('incremental transcript projection', () => {
       locale: 'en',
       sessionId: SESSION,
       messages: [...history(), { type: 'user', id: 'u3', turnId: 'turn-3', ts: 7, text: 'third' }],
-      liveTurn: streamingTurn('half an ans'),
+      liveTurns: streamingTurn('half an ans') ? [streamingTurn('half an ans')] : undefined,
     });
     assert.equal(live[2]?.timeline.some((item) => item.kind === 'text' && item.live === true), true);
 
@@ -282,7 +280,7 @@ describe('incremental transcript projection', () => {
       locale: 'en',
       sessionId: SESSION,
       messages: counted,
-      liveTurn: streamingTurn('h'),
+      liveTurns: streamingTurn('h') ? [streamingTurn('h')] : undefined,
       shellRunUpdates: [backgroundUpdate],
     });
     // Bounded, not merely non-zero: the first projection walks the log a small
@@ -298,7 +296,7 @@ describe('incremental transcript projection', () => {
         locale: 'en',
         sessionId: SESSION,
         messages: counted,
-        liveTurn: streamingTurn(text),
+        liveTurns: streamingTurn(text) ? [streamingTurn(text)] : undefined,
         shellRunUpdates: [backgroundUpdate],
       });
     }
@@ -404,15 +402,14 @@ describe('incremental transcript projection', () => {
       locale: 'en',
       sessionId: SESSION,
       messages: [],
-      liveTurn: {
+      liveTurns: [{
         turnId: 'turn-live',
-        phase: 'streamed',
         steps: [{
           stepId: 'tool:bash-live',
           contentOrder: ['tools'],
           tools: [{ toolUseId: 'bash-live', toolName: 'Bash', status: 'running', args: { command: 'job', pty: true } }],
         }],
-      },
+      }],
       shellRunUpdates: [{
         sessionId: SESSION,
         ownership: { kind: 'source_owned', sourceSessionId: 'source', ownerSessionId: 'source' },
@@ -425,6 +422,42 @@ describe('incremental transcript projection', () => {
     const tool = turns[0]?.tools[0];
     assert.equal(tool?.result?.kind, 'shell_run');
     assert.equal(tool?.shellRunSource, 'owned');
+  });
+
+  test('a streaming delta moves only the timeline item it grew', () => {
+    // The live turn rebuilds its whole timeline per event. The turn object
+    // moves, but a finished tool row inside it did not — the item-level
+    // reconcile is what lets the memoized entry skip its re-render, so the
+    // identity has to survive here, not just at the fold.
+    const projection = createTranscriptProjection();
+    const live = (text: string): LiveTurnProjection => ({
+      turnId: 'turn-3',
+      steps: [
+        {
+          stepId: 'step-tool',
+          contentOrder: ['tools'],
+          tools: [{ toolUseId: 'bash-9', toolName: 'Bash', status: 'completed', args: { command: 'job' } }],
+        },
+        {
+          stepId: 'step-answer',
+          contentOrder: ['text'],
+          text: { text, truncated: false, complete: false },
+          tools: [],
+        },
+      ],
+    });
+    const before = projection.project({ locale: 'en', sessionId: SESSION, messages: history(), liveTurns: [live('he')] });
+    const after = projection.project({ locale: 'en', sessionId: SESSION, messages: history(), liveTurns: [live('hel')] });
+
+    const liveTurn = (turns: readonly TurnViewModel[]) => turns.find((turn) => turn.turnId === 'turn-3')!;
+    const beforeLive = liveTurn(before);
+    const afterLive = liveTurn(after);
+    assert.notStrictEqual(afterLive, beforeLive, 'the turn moved with its text');
+
+    const item = (turn: TurnViewModel, kind: string) => turn.timeline.find((entry) => entry.kind === kind);
+    assert.strictEqual(item(afterLive, 'tools'), item(beforeLive, 'tools'), 'the finished tool row keeps identity');
+    assert.notStrictEqual(item(afterLive, 'text'), item(beforeLive, 'text'), 'the growing text is a new object');
+    assert.strictEqual(after[0], before[0], 'the settled sibling turn stays untouched');
   });
 });
 

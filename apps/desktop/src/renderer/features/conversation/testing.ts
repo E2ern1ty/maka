@@ -19,10 +19,7 @@
 
 export {
   createTranscriptRestoreLifecycle,
-  loadTranscriptHistory,
   prepareTranscriptForSend,
-  refreshTranscriptTurnLandmarks,
   restoreSessionTranscriptRange,
-  type TranscriptHistoryGates,
-  type TranscriptHistoryPending,
 } from './controller/transcript-reading-position.js';
+export { shellSessionRowEqual } from './controller/use-app-shell-session-ui-state.js';

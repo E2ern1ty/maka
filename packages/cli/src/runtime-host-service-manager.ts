@@ -53,10 +53,7 @@ import {
   type RuntimeHostServiceErrorCode,
   type RuntimeHostSupervisorProvider,
 } from '@maka/runtime-host/operator';
-import {
-  withLegacyFileUpdateLockLease,
-  withProcessLifetimeFileUpdateLock,
-} from '@maka/storage/process-lifetime-file-update-lock';
+import { withProcessLifetimeFileUpdateLock } from '@maka/storage/process-lifetime-file-update-lock';
 import {
   discoverMarkedStorageRoot,
   resolveExistingStorageRoot,
@@ -370,32 +367,13 @@ export async function withRuntimeHostManagedServiceLifecycleLock<T>(
 
 export async function withRuntimeHostManagedServiceDeploymentLock<T>(
   clientDataRoot: string,
-  operation: () => Promise<T>,
+  operation: (inheritableLeaseFd?: number) => Promise<T>,
   timeoutMs = SERVICE_OPERATION_LOCK_TIMEOUT_MS,
 ): Promise<T> {
   await mkdir(clientDataRoot, { recursive: true, mode: 0o700 });
   return withProcessLifetimeFileUpdateLock(
     join(clientDataRoot, SERVICE_DEPLOYMENT_LOCK_FILE),
     operation,
-    timeoutMs,
-  );
-}
-
-export async function withRuntimeHostManagedServiceLegacyOperatorLeases<T>(
-  clientDataRoot: string,
-  operation: (inheritedFds: readonly number[]) => Promise<T>,
-  timeoutMs = SERVICE_OPERATION_LOCK_TIMEOUT_MS,
-): Promise<T> {
-  const configPath = resolveRuntimeHostManagedServiceConfigPath(clientDataRoot);
-  await mkdir(dirname(configPath), { recursive: true, mode: 0o700 });
-  return withLegacyFileUpdateLockLease(
-    join(clientDataRoot, SERVICE_LIFECYCLE_LOCK_FILE),
-    (lifecycleFd) =>
-      withLegacyFileUpdateLockLease(
-        configPath,
-        (configFd) => operation([lifecycleFd, configFd]),
-        timeoutMs,
-      ),
     timeoutMs,
   );
 }

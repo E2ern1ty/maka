@@ -57,28 +57,6 @@ import type { CompanionForkVisibilityEvent } from './quote-companion-visibility'
 import { readScrollMotionBehavior } from '../../../../scroll-motion-policy';
 import { useWorkbarServices } from '../../services-context.js';
 
-const RUNNING_STATUS_DELAY_MS = 200;
-
-/**
- * A boolean that turns true only after `condition` has held for `delayMs`, and
- * false the moment it drops — the rising-edge delay that keeps a fast turn from
- * flashing the running-status line. A feature-local copy of the shell's
- * useDelayedFlag: the renderer-legacy original is walled off from feature code
- * by the architecture budget, and this is only a few lines of timer plumbing.
- */
-function useDelayedFlag(condition: boolean, delayMs: number): boolean {
-  const [visible, setVisible] = useState(false);
-  useEffect(() => {
-    if (!condition) {
-      setVisible(false);
-      return;
-    }
-    const handle = window.setTimeout(() => setVisible(true), delayMs);
-    return () => window.clearTimeout(handle);
-  }, [condition, delayMs]);
-  return visible;
-}
-
 /**
  * The side-conversation workbar tab: a transient read-only fork of the main session.
  * It renders with the SAME surface as the main conversation — the real
@@ -146,6 +124,7 @@ export function QuoteCompanionPanel(props: {
   });
   const companion = useQuoteCompanion({
     panelId: props.panelId,
+    active: props.active,
     pendingQuotes: props.quotes,
     sourceSession: props.sourceSession,
     modelChoices: props.modelChoices,
@@ -191,30 +170,10 @@ export function QuoteCompanionPanel(props: {
   useEffect(() => {
     props.onContentStateChange?.(props.panelId, companion.hasContent);
   }, [companion.hasContent, props.onContentStateChange, props.panelId]);
-  // The transcript's running-status line ("正在琢磨… · Ns"). Like the main chat
-  // (useShellLiveTurn → showRunningStatus) it rides the whole active turn, not
-  // just the pre-first-token wait, with the same rising-edge delay so a fast
-  // turn never flashes it. The companion's `processing` only covers the wait
-  // window, which is why the side panel used to show almost no progress cue.
-  // `transientMessages` covers the first-send window BEFORE the fork commits and
-  // the admission is armed: the optimistic bubble is on screen but `streaming`
-  // is still false, and the cue must already be up (the admission is deliberately
-  // armed late so the Stop button never appears before `stop()` can act on it).
-  const showRunningStatus = useDelayedFlag(
-    companion.streaming || companion.transientMessages.length > 0,
-    RUNNING_STATUS_DELAY_MS,
-  );
+  const active = Boolean(companion.activeTurn) || companion.processing;
   useEffect(() => {
-    props.onActivityStateChange?.(
-      props.panelId,
-      companion.streaming || companion.processing,
-    );
-  }, [
-    companion.processing,
-    companion.streaming,
-    props.onActivityStateChange,
-    props.panelId,
-  ]);
+    props.onActivityStateChange?.(props.panelId, active);
+  }, [active, props.onActivityStateChange, props.panelId]);
   useEffect(() => {
     if (!props.active) return;
     const frame = window.requestAnimationFrame(() => composerRef.current?.focus());
@@ -284,9 +243,6 @@ export function QuoteCompanionPanel(props: {
             status: turn.status,
             locale,
             hasContent: finalAssistantReplyText(turn).trim().length > 0,
-            ...(companion.regeneratePendingTurnId === turn.turnId
-              ? { pendingActions: new Set(['regenerate'] as const) }
-              : {}),
           }).filter((action) => action.id !== 'branch'),
         ]),
       ),
@@ -295,13 +251,12 @@ export function QuoteCompanionPanel(props: {
       failedExecutionStateLabels: {},
       lineageBadgesByTurn: {},
     }),
-    [companion.regeneratePendingTurnId, locale],
+    [locale],
   );
 
   return (
     <div className="maka-quote-companion">
       <ChatSurfaceLayout
-        scrollOwner="host"
         scrollToBottomLabel={copy.scrollToBottom}
         composer={
           <>
@@ -335,6 +290,7 @@ export function QuoteCompanionPanel(props: {
                 {companion.activeForm && (
                   <FormInteractionPrompt
                     request={companion.activeForm}
+                    modelChoices={props.modelChoices}
                     onRespond={companion.respondToUserForm}
                   />
                 )}
@@ -342,12 +298,40 @@ export function QuoteCompanionPanel(props: {
             )}
             <Composer
               ref={composerRef}
-              onSend={(text) =>
+              onSend={(text, metadata) =>
                 dispatchQuoteCompanionInput({
                   text,
                   streaming: companion.streaming,
+                  followUpMode: metadata?.followUpMode,
                   compact: companion.compact,
-                  steer: companion.steer,
+                  queue: companion.queue,
+                  steer: async (text) => {
+                    // Same staged-attachment validation as `send`: an unusable
+                    // attachment rejects here with the localized toast instead
+                    // of dying later on the steer path.
+                    try {
+                      preflightAttachmentItems(pendingAttachments);
+                    } catch (error) {
+                      toast.error(
+                        copy.errors.sendRejected,
+                        localizedShellErrorMessage(error, copy.errors.sendRejected, locale),
+                      );
+                      return false;
+                    }
+                    // Submitted attachments retire on the confirmed-admission
+                    // boundary, not on the hook's optimistic return: an unknown
+                    // outcome keeps them staged for retry (#4804).
+                    const submitted = pendingAttachments;
+                    const submittedItems =
+                      submitted.length > 0 ? toComposerIngestItems(submitted) : undefined;
+                    return companion.steer(
+                      text,
+                      submittedItems,
+                      submittedItems
+                        ? () => clearSubmittedAttachments(submitted)
+                        : undefined,
+                    );
+                  },
                   send: async () => {
                     try {
                       preflightAttachmentItems(pendingAttachments);
@@ -358,16 +342,20 @@ export function QuoteCompanionPanel(props: {
                       );
                       return false;
                     }
+                    // Same admission-boundary retirement as `steer` above.
+                    const submitted = pendingAttachments;
+                    const submittedItems =
+                      submitted.length > 0 ? toComposerIngestItems(submitted) : undefined;
                     const accepted = await companion.send(
                       text,
-                      pendingAttachments.length > 0
-                        ? toComposerIngestItems(pendingAttachments)
+                      submittedItems,
+                      submittedItems
+                        ? () => clearSubmittedAttachments(submitted)
                         : undefined,
                     );
                     if (accepted) {
                       props.onPromptAccepted?.(props.panelId, text);
                     }
-                    if (accepted) clearSubmittedAttachments(pendingAttachments);
                     return accepted;
                   },
                 })
@@ -376,10 +364,19 @@ export function QuoteCompanionPanel(props: {
               hidden={Boolean(activeInteraction)}
               streaming={companion.streaming}
               processing={companion.processing}
+              queuedMessages={companion.queuedMessages}
+              pendingMessages={companion.transientMessages}
+              queuedMessageRevision={companion.queuedMessageRevision}
+              onPromoteQueuedEntry={companion.promoteQueuedEntry}
+              onUpdateQueuedEntry={companion.updateQueuedEntry}
+              onDeleteQueuedEntry={companion.deleteQueuedEntry}
+              onReorderQueuedEntries={companion.reorderQueuedEntries}
               draftKey={draftKey}
               disabled={!companion.modelReady}
               onPickAttachments={pickAttachments}
               onAttachFilePaths={attachFilePaths}
+              // The side chat submits staged context without a prompt (#4804).
+              allowAttachmentOnlySend
               pendingAttachments={pendingAttachments}
               onRemoveAttachment={removeAttachment}
               mentionSkills={mentions?.mentionSkills}
@@ -416,15 +413,18 @@ export function QuoteCompanionPanel(props: {
           messages={companion.messages}
           transientMessages={companion.transientMessages}
           scrollBehavior={readScrollMotionBehavior()}
-          liveTurn={companion.liveTurn}
-          runningStatus={showRunningStatus}
+          liveTurns={companion.liveTurns}
+          activeTurn={companion.activeTurn}
           activeSession={companion.companionSession}
           onReadAttachmentBytes={attachments.readBytes}
           deriveTurnPresentation={deriveTurnPresentation}
-          onTurnFooterAction={(turnId, actionId) => {
-            if (actionId === 'regenerate') {
-              void companion.regenerate(turnId);
-            }
+          onEditUserMessage={(turnId) => {
+            const message = companion.messages.find(
+              (candidate) => candidate.type === 'user' && candidate.turnId === turnId,
+            );
+            if (message?.type !== 'user') return;
+            composerRef.current?.setText(message.text);
+            composerRef.current?.focus();
           }}
           emptyOverride={<div className="maka-quote-companion-empty" aria-hidden="true" />}
           onNew={() => {}}

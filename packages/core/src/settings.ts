@@ -76,6 +76,7 @@ export const SETTINGS_SECTIONS = [
   'daily-review',
   'models',
   'subagents',
+  'external-agents',
   'usage',
   // `maka://settings/<section>` is a public deep link, so the id names what
   // the page is rather than the noun it lives under.
@@ -485,7 +486,7 @@ export interface PrivacySettings {
 }
 
 /**
- * `explore` is excluded — it's reserved for Deep Research sessions and
+ * `explore` is excluded — it's reserved for read-only sessions and
  * Bot-incoming guards and is never a mode the user picks, in the composer
  * dropdown or here. Derived from the canonical PERMISSION_MODES (not a
  * hand-copied literal) so adding a future mode updates every consumer —
@@ -510,15 +511,9 @@ export function isChatDefaultPermissionMode(value: unknown): value is ChatDefaul
 /** Seeds new sessions' starting permission mode (Settings → 通用 → 默认权限模式). */
 export interface ChatDefaultsSettings {
   permissionMode: ChatDefaultPermissionMode;
-  /**
-   * Seeds new sessions' thinking level. `undefined` means "whatever the model
-   * does on its own" — the absence of a preference, not a level.
-   *
-   * A chosen level is a wish, not a guarantee: models expose different ladders,
-   * so one that does not offer the chosen rung falls back to its own default
-   * for that session rather than being forced to the nearest neighbour. The
-   * composer already resolves it that way for the per-session picker.
-   */
+  /** Applies only when a new task is created. */
+  codeModeEnabled?: boolean;
+  /** @deprecated Read-only compatibility for older settings; new tasks ignore it. */
   thinkingLevel?: ThinkingLevel;
 }
 
@@ -584,6 +579,7 @@ export interface AppSettings {
   notifications: NotificationSettings;
   workHub: WorkHubSettings;
   system: SystemSettings;
+  externalAgents: { antigravity: { executable: string } };
   shell: ShellSettings;
   subagents: SubagentSettings;
 }
@@ -630,6 +626,13 @@ export interface UsageSummary {
 }
 
 export interface UsageStats {
+  navigation?: {
+    activityTotal: number;
+    revision: string;
+    queryIdentity: string;
+    query: UsageScreenQuery;
+    nextCursor: string | null;
+  };
   summary: UsageSummary;
   logs: UsageRequestLog[];
   byProvider: Array<{
@@ -671,6 +674,54 @@ export interface UsageStats {
    */
   logsTruncated?: boolean;
 }
+
+/** A fixed query; activity filters never change headline accounting. */
+export interface UsageScreenQuery {
+  range: { from: number; to: number };
+  search: string;
+  status: 'all' | 'success' | 'error' | 'aborted';
+}
+
+export interface UsageActivityPage {
+  revision: string;
+  queryIdentity: string;
+  logs: UsageRequestLog[];
+  nextCursor: string | null;
+}
+
+export interface UsageScreen extends UsageStats, UsageActivityPage {
+  activityTotal: number;
+  query: UsageScreenQuery;
+}
+
+export type UsageScreenFailure =
+  | { kind: 'revision_changed' }
+  | {
+      kind: 'screen_response_too_large';
+      section:
+        | 'provider_breakdown'
+        | 'model_breakdown'
+        | 'tool_breakdown'
+        | 'pricing'
+        | 'activity_page'
+        | 'screen'
+        | 'message';
+    };
+
+export type UsageScreenRequest =
+  | { kind: 'screen'; query: UsageScreenQuery }
+  | {
+      kind: 'activity';
+      query: UsageScreenQuery;
+      revision: string;
+      queryIdentity: string;
+      cursor: string;
+    };
+
+export type UsageScreenResult =
+  | { kind: 'screen'; screen: UsageScreen }
+  | { kind: 'activity'; page: UsageActivityPage }
+  | UsageScreenFailure;
 
 export interface SettingsTestResult {
   ok: boolean;
@@ -718,10 +769,16 @@ export type UpdateAppSettingsInput = Partial<{
   notifications: Partial<NotificationSettings>;
   workHub: Partial<WorkHubSettings>;
   system: Partial<SystemSettings>;
+  externalAgents: AppSettings['externalAgents'];
   shell: Partial<ShellSettings>;
   webSearch: WebSearchSettingsPatch;
   subagents: SubagentSettings;
 }>;
+
+/** Preconditions for a Host-owned Settings write that must not be retried past a semantic change. */
+export interface RuntimeHostSettingsUpdateGuard {
+  readonly expectedExternalAgentExecutable?: string;
+}
 
 export type PersonalizationSettingsWarning =
   | 'override-attempt'
@@ -804,6 +861,7 @@ export function createDefaultSettings(): AppSettings {
       // battery-affecting opt-in, not a silent default.
       keepSystemAwake: false,
     },
+    externalAgents: { antigravity: { executable: '' } },
     shell: {
       preference: 'auto',
       executable: '',
@@ -892,6 +950,7 @@ export function mergeSettings(current: AppSettings, patch: UpdateAppSettingsInpu
       ...current.system,
       ...(patch.system ?? {}),
     },
+    externalAgents: patch.externalAgents ?? current.externalAgents,
     shell: {
       ...current.shell,
       ...(patch.shell ?? {}),
@@ -923,6 +982,7 @@ export function normalizeSettings(input: unknown): AppSettings {
     notifications: value.notifications,
     workHub: value.workHub,
     system: value.system,
+    externalAgents: value.externalAgents,
     shell: value.shell,
     subagents: value.subagents,
   });
@@ -1027,6 +1087,14 @@ export function normalizeSettings(input: unknown): AppSettings {
       keepSystemAwake:
         typeof base.system.keepSystemAwake === 'boolean' ? base.system.keepSystemAwake : false,
     },
+    externalAgents: {
+      antigravity: {
+        executable:
+          typeof base.externalAgents?.antigravity?.executable === 'string'
+            ? base.externalAgents.antigravity.executable
+            : '',
+      },
+    },
     shell: normalizeShellSettings(base.shell),
     subagents: normalizeSubagentSettings(base.subagents),
   };
@@ -1063,7 +1131,7 @@ function defaultProjectPreferencesSettings(): ProjectPreferencesSettings {
 }
 
 function defaultChatDefaultsSettings(): ChatDefaultsSettings {
-  return { permissionMode: 'ask' };
+  return { permissionMode: 'bypass' };
 }
 
 // Closed-enum fail-closed, same reasoning as appearance.palette /
@@ -1073,9 +1141,9 @@ function defaultChatDefaultsSettings(): ChatDefaultsSettings {
 // doesn't recognize -- fall back to the safest default instead.
 function normalizeChatDefaultsSettings(settings: ChatDefaultsSettings): ChatDefaultsSettings {
   return {
-    // Same fail-closed reasoning as the mode below: a garbage persisted level
-    // drops to "no preference" (the model's own default) rather than reaching
-    // session creation as a rung no picker recognizes.
+    ...(settings.codeModeEnabled === true ? { codeModeEnabled: true } : {}),
+    // Preserve the retired field while older settings documents still carry it.
+    // No task creation path consumes it; defaults now live on model overrides.
     thinkingLevel: isThinkingLevel(settings.thinkingLevel) ? settings.thinkingLevel : undefined,
     // A retired mode is decoded (not rejected) so an existing settings file
     // keeps working; knowing which modes are retired lives in one place.

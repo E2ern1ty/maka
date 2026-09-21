@@ -18,7 +18,6 @@
  */
 
 import { useMemo, useState, type ComponentProps, type ReactNode } from 'react';
-import { isDeepResearchSession } from '@maka/core/deep-research';
 import { type LlmConnection, type ProviderType } from '@maka/core/llm-connections';
 import { type OnboardingState } from '@maka/core/onboarding';
 import { type SettingsSection } from '@maka/core/settings';
@@ -35,11 +34,9 @@ import type { SessionHealthNoticeView } from './use-shell-chat-model';
 import type { WorkspaceReadinessRecovery } from './workspace-readiness-recovery';
 import type { TaskReadinessNotice } from './task-readiness-notice';
 import { getShellCopy } from './locales/shell-copy';
-import { selectLiveTurn } from './use-app-shell-session-ui-reads';
-import { useExternalStoreSelector } from './use-external-store-selector';
-import { useDeepResearchRun } from './use-deep-research-run';
+import { selectLiveTurns } from './features/conversation/index.js';
+import { useExternalStoreSelector } from './application/contracts/session-catalog/use-external-store-selector.js';
 import { ChatRecoveryNotice, SessionHealthRecoveryNotice } from './chat-recovery-notice';
-import type { TranscriptHistoryPending } from './features/conversation';
 
 const selectShellRunRecord = (state: AppShellSessionUiState, sessionId: string | undefined) =>
   sessionId ? state.shellRunUpdatesBySession[sessionId] : undefined;
@@ -57,13 +54,11 @@ const selectShellRunRecord = (state: AppShellSessionUiState, sessionId: string |
 
 interface ChatMessageSurfaceProps extends Omit<
   ComponentProps<typeof ChatView>,
-  | 'deepResearchRun'
   | 'emptyOverride'
   | 'initialLiveContentSnapshot'
-  | 'liveTurn'
+  | 'liveTurns'
   | 'shellRunUpdates'
   | 'goalIndicator'
-  | 'historyLoadPending'
 > {
   /**
    * #1985: the live projection and the shell-run records are the only session
@@ -91,10 +86,6 @@ interface ChatMessageSurfaceProps extends Omit<
   connections: LlmConnection[];
   onRefreshConnections: () => Promise<void> | void;
   onSkip: () => Promise<void> | void;
-  hasOlderHistory?: boolean;
-  hasNewerHistory?: boolean;
-  historyLoadPending?: TranscriptHistoryPending;
-  onLoadHistory: (target: 'earlier' | 'later' | 'latest', anchorTurnId?: string) => Promise<void> | void;
 }
 
 function captureLiveContent(liveTurn: LiveTurnProjection | undefined) {
@@ -127,10 +118,6 @@ export function ChatMessageSurface({
   connections,
   onRefreshConnections,
   onSkip,
-  hasOlderHistory,
-  hasNewerHistory,
-  historyLoadPending,
-  onLoadHistory,
   ...chatViewRest
 }: ChatMessageSurfaceProps) {
   const locale = useUiLocale();
@@ -153,13 +140,9 @@ export function ChatMessageSurface({
         return;
     }
   };
-  const activeSession = chatViewRest.activeSession;
-  const deepResearchRun = useDeepResearchRun(
-    activeSession?.id,
-    isDeepResearchSession(activeSession?.labels),
-  );
-  const liveTurn = useExternalStoreSelector(sessionUiController, selectLiveTurn, activeSessionId);
-  const seededLiveTurn = liveContentSeedRevision > 0 ? liveTurn : undefined;
+  const liveTurns = useExternalStoreSelector(sessionUiController, selectLiveTurns, activeSessionId);
+  const liveTurn = liveTurns?.find((turn) => turn.turnId === chatViewRest.activeTurn?.turnId) ?? liveTurns?.at(-1);
+  const seededLiveTurns = liveContentSeedRevision > 0 ? liveTurns : undefined;
   const [activation, setActivation] = useState(() => ({
     sessionId: activeSessionId,
     seedRevision: liveContentSeedRevision,
@@ -177,9 +160,7 @@ export function ChatMessageSurface({
   } else if (
     activation.initialLiveContent
     && (
-      !seededLiveTurn
-      || seededLiveTurn.terminal
-      || seededLiveTurn.turnId !== activation.initialLiveContent.turnId
+      !seededLiveTurns?.some((turn) => turn.turnId === activation.initialLiveContent?.turnId && !turn.terminal)
     )
   ) {
     setActivation({
@@ -238,22 +219,14 @@ export function ChatMessageSurface({
           <ChatView
             {...chatViewRest}
             viewportNavigation={sessionUiController.transcriptViewportNavigation}
-            liveTurn={seededLiveTurn}
-            // Every branch above reseeds `sessionId` to `activeSessionId`, and a
+            liveTurns={seededLiveTurns}
+              // Every branch above reseeds `sessionId` to `activeSessionId`, and a
             // render-phase setState re-runs this body before anything commits, so
             // the activation reaching the DOM is always this session's.
             initialLiveContentSnapshot={activation.initialLiveContent}
             shellRunUpdates={shellRunUpdates}
-            deepResearchRun={deepResearchRun}
             emptyOverride={emptyOverride}
             goalIndicator={goalProjection.goalIndicator}
-            hasOlderHistory={hasOlderHistory}
-            hasNewerHistory={hasNewerHistory}
-            historyLoadPending={historyLoadPending && historyLoadPending.sessionId === activeSessionId
-              ? historyLoadPending.target === 'earlier' ? 'older' : 'newer'
-              : undefined}
-            onLoadEarlierHistory={(anchorTurnId) => onLoadHistory('earlier', anchorTurnId)}
-            onLoadLaterHistory={(anchorTurnId) => onLoadHistory('later', anchorTurnId)}
           />
         )}
       </ChatViewGoalProjectionConsumer>

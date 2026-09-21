@@ -123,6 +123,7 @@ const coveredExtensions = new Map([
   ['.py', 'hash'],
   ['.rs', 'block'],
   ['.sh', 'hash'],
+  ['.sql', 'block'],
   ['.swift', 'block'],
   ['.toml', 'hash'],
   ['.ts', 'block'],
@@ -195,6 +196,7 @@ export const exclusionRules = [
       'packages/cli/RUNTIME_HOST_PEER_DEPENDENCIES.rust.tsv',
       'packages/cli/RUNTIME_HOST_PEER_THIRD_PARTY_NOTICES.txt',
       'packages/cli/THIRD_PARTY_NOTICES.txt',
+      'patches/run-2.1.4-notices.md',
     ),
   },
   {
@@ -204,6 +206,7 @@ export const exclusionRules = [
     matches: (path) =>
       isOneOf(
         'experiments/windows-sandbox/launcher/Cargo.lock',
+        'patches/run-2.1.4-source.diff',
         // Adapted from opencode under MIT; attribution pinned by #3325.
         'packages/runtime/src/edit-replace.ts',
         'packages/runtime/src/tool-output.ts',
@@ -251,7 +254,6 @@ export const exclusionRules = [
     matches: (path) =>
       isOneOf(
         'packages/storage/src/__tests__/fixtures/codex-rollout-v0.144.jsonl',
-        'packages/storage/test-fixtures/v0.1.6-operational-state/runtime.sqlite',
         'packages/storage/test-fixtures/workflow-schema-v8.sql',
       )(path) || isUnder('docs/eval', '.csv')(path),
   },

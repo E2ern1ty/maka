@@ -40,6 +40,15 @@
   max-width: var(--maka-reading-measure);
 }
 
+.maka-return-workhub {
+  --_button-radius: var(--radius-chat);
+  display: flex;
+  width: min(var(--maka-reading-measure), calc(100% - 2 * var(--space-6)));
+  min-height: var(--space-10);
+  margin: 0 auto;
+  text-align: center;
+}
+
 /* Reaching the transcript tail fades the scroll-to-bottom control while the
    composer below it stays still. Both otherwise share the dock's filtered
    compositing surface, so Chromium may re-raster the thin context-gauge paths
@@ -144,6 +153,33 @@
   gap: var(--space-1-5);
   flex-direction: row;
   padding: var(--space-1) var(--space-3) var(--space-2);
+}
+
+/* Session references share the input's surface and stay visible while typing. */
+.maka-composer-session-references {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1-5);
+  min-width: 0;
+  padding: var(--space-1) var(--space-1) 0;
+}
+
+.maka-composer-session-references .maka-composer-session-token {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: min(420px, 100%);
+  height: 28px;
+  padding-inline: var(--space-2);
+  border-radius: var(--radius-full);
+  font-weight: 400;
+  background: var(--muted);
+}
+
+.maka-composer-session-token-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Astryx ChatComposerDrawer wraps its content in a display:grid whose single
@@ -364,7 +400,6 @@
   min-width: 100px;
   max-width: min(220px, 28vw);
 }
-
 .maka-composer-model-chip-text {
   min-width: 0;
   overflow: hidden;
@@ -607,4 +642,20 @@
   align-items: center;
   justify-content: space-between;
   gap: var(--space-3);
+}
+
+.maka-composer-queue-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: var(--space-1) var(--space-2);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.maka-composer-queue-delivery {
+  font-size: 11px;
+  color: var(--muted-foreground);
 }
